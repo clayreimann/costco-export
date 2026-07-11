@@ -1,6 +1,6 @@
 # costco-export
 
-A Chrome/Arc extension for bulk export of Costco receipt data, focused on item-level spending analysis and categorization.
+A Chrome/Arc extension for bulk export of Costco receipt data, focused on item-level receipt export for out-of-band spending analysis.
 
 ## Planning
 

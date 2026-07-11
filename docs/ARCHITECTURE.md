@@ -2,12 +2,12 @@
 
 ## Goal
 
-Build a local-first Chrome/Arc extension that runs on `costco.com` order pages, collects Costco order and receipt details, normalizes them into stable structured data, and exports item-level spending data for categorization and analysis.
+Build a local-first Chrome/Arc extension that runs on `costco.com` order pages, collects Costco order and receipt details, normalizes them into stable structured data, and exports item-level spending data for analysis.
 
 The design is inspired by Amazon order-history extensions such as AZAD/Amazon Order History Reporter: the user authenticates directly with the retailer, the extension operates from the orders page, shows scrape progress in the extension UI, visits order/receipt detail pages as needed, and exports CSV/JSON locally. Costco differs in two important ways:
 
 1. In-warehouse Costco receipts often contain many line items, discounts, tax markers, tender details, warehouse/register metadata, and receipt identifiers.
-2. The primary analysis unit should be the receipt line item, not just the order, so users can split one receipt across categories such as groceries, household goods, pharmacy, auto, seasonal, and other buckets.
+2. The primary analysis unit should be the receipt line item, not just the order, so another process can categorize spending out of band.
 
 ## Current example pages
 
@@ -18,12 +18,12 @@ The `examples/` directory contains two saved Costco pages that should become par
 
 ## Product principles
 
-- **Local-first privacy:** no hosted backend is required for MVP. HTML parsing, categorization, storage, and export happen in the browser.
+- **Local-first privacy:** no hosted backend is required. HTML parsing, receipt review, and export happen in the browser for the current session.
 - **Least privilege:** request host access only for Costco domains and avoid privileged APIs such as `debugger` unless a later feature absolutely requires them.
 - **User-driven scraping:** the user opens Costco Orders & Purchases, selects a date range, and starts export from the extension popup/side panel.
-- **Incremental and resumable:** save scrape state after each receipt so long Costco histories can continue after interruption.
+- **Session-only workflow:** keep scrape results in memory long enough to render a review page and download exports; do not require IndexedDB, `localStorage`, or durable checkpoints.
 - **Transparent data quality:** every parsed receipt and item should carry status, warnings, source URL, and raw text snippets sufficient to debug parser drift.
-- **Item-level categorization:** category assignment should be visible, editable, and exportable, with confidence/source metadata.
+- **Item visibility, not categorization:** the extension should make receipt line items easy to inspect and export; categorization is explicitly out of scope and should happen out of band.
 
 ## Proposed extension architecture
 
@@ -36,23 +36,22 @@ extension/
     background/        # service worker orchestration and tab lifecycle
     content/           # Costco DOM adapters injected into costco.com
     parsers/           # pure HTML/DOM-to-domain parsing functions
-    domain/            # schemas, normalization, category rules, exporters
+    domain/            # schemas, normalization, exporters
     ui/                # popup or side panel for controls, progress, review
-    storage/           # chrome.storage/IndexedDB repositories and migrations
     tests/             # parser fixture tests using examples/*.html
 ```
 
 ### 1. UI layer
 
-A popup is enough for the first prototype, but a side panel is likely better once category review is added.
+A popup is enough for the first prototype, but a side panel is likely better once larger receipt review is added.
 
 Responsibilities:
 
 - Detect whether the active tab is a supported Costco orders page.
 - Let the user choose mode: current page, visible date range, selected months, or all loaded receipts.
 - Display progress: discovered orders, receipts fetched, parser failures, skipped duplicates, and export readiness.
-- Provide exports: `items.csv`, `receipts.csv`, `orders.json`, and optionally a Tiller/YNAB-friendly transaction split CSV.
-- Provide category review: group uncategorized line items by normalized item name / item number, allow bulk assignment, and persist rules.
+- Provide exports: `items.csv`, `receipts.csv`, `orders.json`, and TOON, and optionally a Tiller/YNAB-friendly transaction split CSV.
+- Provide a receipt review view: group item rows under each receipt so the user can visually inspect purchases before download.
 
 ### 2. Background service worker
 
@@ -62,14 +61,14 @@ Responsibilities:
 - Open/reuse a Costco tab and ask content scripts to inspect the current page.
 - Navigate/click into receipts when the receipt is only available behind a modal or detail route.
 - Rate-limit actions to avoid hammering Costco and to keep the browser responsive.
-- Persist checkpoints after every receipt.
+- Keep current-run scrape results in memory until the review/export page is closed.
 - Own download/export creation via `chrome.downloads`.
 
 Suggested job states:
 
 ```text
 idle -> discoveringOrders -> queueingReceipts -> fetchingReceipt -> parsingReceipt
-     -> categorizing -> readyToExport -> exporting -> complete
+     -> renderingReview -> readyToExport -> exporting -> complete
                        \-> paused/error/loginRequired
 ```
 
@@ -104,7 +103,6 @@ Key parsers:
 - `parseReceipt(documentOrElement, context): Receipt`
 - `normalizeReceipt(receipt): NormalizedReceipt`
 - `linkDiscountRows(items): ReceiptItem[]`
-- `categorizeItems(items, rules): CategorizedItem[]`
 
 Important receipt parsing rules:
 
@@ -114,17 +112,16 @@ Important receipt parsing rules:
 - Stop item parsing at summary labels such as `SUBTOTAL`, `TAX`, `Total`, payment/tender rows, `TOTAL TAX`, and `TOTAL NUMBER OF ITEMS SOLD`.
 - Preserve raw row text and parser warnings so receipt-format changes are diagnosable.
 
-### 5. Storage/export layer
+### 5. Review/export layer
 
-Use IndexedDB for receipt/item data because Costco histories can have many receipt rows. Use `chrome.storage.local` only for preferences, scrape checkpoints, and category rules.
+No durable browser persistence is required for the MVP. The background worker can keep the active scrape results in memory, render them in a generated review page or extension page, and immediately offer downloads. If the browser or service worker restarts, the user can rerun the scrape rather than resuming from IndexedDB or local storage.
 
-Data stores:
+Responsibilities:
 
-- `scrapeJobs`: job id, selected range, status, counts, timestamps, current queue.
-- `receipts`: one row per Costco receipt, keyed by `receiptId` or a synthetic key.
-- `items`: one row per parsed receipt line item, keyed by `receiptId + lineIndex`.
-- `categoryRules`: user-maintained mapping rules by item number, normalized name, regex, or exact name.
-- `exports`: metadata for generated downloads.
+- Hold the active scrape result in memory for the current browser session.
+- Render a receipt-centric review view where each receipt expands to show item rows, discounts, subtotal, tax, total, and parser warnings.
+- Generate downloads for CSV, JSON, and TOON from the in-memory result.
+- Avoid storing receipt history, category rules, or scrape checkpoints in IndexedDB, `localStorage`, or `chrome.storage` unless a future requirement changes this scope.
 
 ## Data model
 
@@ -184,30 +181,20 @@ export interface CostcoReceiptItem {
   netAmount: number;
   taxable?: boolean;
   foodStampEligible?: boolean; // if receipt marker semantics are confirmed
-  category?: string;
-  categoryConfidence?: number;
-  categorySource?: 'user_rule' | 'built_in_rule' | 'manual' | 'uncategorized';
   rawText: string;
   warnings: string[];
 }
 ```
 
-## Categorization strategy
+## Out-of-scope categorization
 
-Start simple and make the system learn from corrections.
+The extension should not categorize spending. Its responsibility is to expose the raw receipt structure clearly enough for another process to categorize out of band. To support that downstream process, exports should preserve:
 
-1. Built-in seed rules for obvious keywords and known Costco item-number examples:
-   - groceries: berries, milk, beans, rice, bananas, broccoli, meat, pasta sauce.
-   - household: paper towels, toilet paper, cleaning supplies.
-   - auto: wiper fluid, tires, car wash, battery.
-   - pharmacy/health: vitamins, prescriptions, OTC medicine.
-   - seasonal/home: patio, sunshade, appliance, furniture.
-2. User rules override built-in rules:
-   - exact item number is highest confidence.
-   - normalized description exact match is next.
-   - regex/keyword rules are lower confidence.
-3. Category review screen shows uncategorized and low-confidence items grouped by item number/name.
-4. Export includes both raw Costco text and category metadata so analysis can be revised later.
+- receipt identity, date/time, warehouse, totals, tax, and tender metadata;
+- item number, raw description, normalized description, quantity/unit-price hints, gross amount, discounts, net amount, taxable marker, and raw row text;
+- parser warnings and source context for auditability.
+
+Do not add category rules, category review UI, confidence scores, category persistence, IndexedDB, `localStorage`, or durable scrape storage unless the project scope changes.
 
 ## Export formats
 
@@ -244,15 +231,16 @@ One row per item:
 - discount_amount
 - net_amount
 - taxable
-- category
-- category_source
-- category_confidence
 - raw_text
 - warnings
 
 ### `orders.json`
 
 Complete nested receipt objects with parser metadata and raw/debug fields for reprocessing.
+
+### TOON
+
+TOON (Token-Oriented Object Notation) should be supported as an additional structured export for workflows that prefer compact, LLM-friendly object notation. The TOON export should contain the same semantic data as `orders.json`, including receipts, items, discounts, totals, and parser warnings, but encoded in TOON rather than JSON. Keep field names aligned with the JSON schema so downstream tools can transform between the two formats predictably.
 
 ## Build plan
 
@@ -261,7 +249,7 @@ Complete nested receipt objects with parser metadata and raw/debug fields for re
 - Add a package manager and TypeScript build setup.
 - Add Manifest V3 extension skeleton.
 - Add fixture-test infrastructure that can parse saved Costco HTML under `examples/`.
-- Define JSON schemas/types for receipts, items, category rules, and exports.
+- Define JSON schemas/types for receipts, items, and exports.
 
 ### Milestone 1: Parser-first prototype
 
@@ -275,29 +263,21 @@ Complete nested receipt objects with parser metadata and raw/debug fields for re
 - Build the extension popup.
 - Inject a content script into the active Costco receipt page/modal.
 - Parse the current visible receipt.
-- Download `items.csv` and `orders.json` for the current receipt.
+- Render the current receipt with item rows and download `items.csv`, `orders.json`, and TOON for the current receipt.
 
 ### Milestone 3: Orders page discovery and modal scraping
 
 - Parse visible order cards from the orders list.
 - Click each `View Receipt` button, wait for modal content, parse the receipt, close modal, and proceed.
-- Add progress UI, pause/resume, dedupe by receipt id, and error capture.
+- Add progress UI, dedupe by receipt id within the current run, and error capture.
 
 ### Milestone 4: Date range and history scraping
 
 - Support Costco date filters/tabs and lazy-loaded history.
-- Add durable IndexedDB checkpoints.
 - Add retry handling for login/session expiration and modal load failures.
 - Add rate limiting and user-visible diagnostics.
 
-### Milestone 5: Categorization and review
-
-- Add seed category rules and rule precedence.
-- Add category review UI grouped by normalized item or item number.
-- Persist user category overrides.
-- Include category metadata in all exports.
-
-### Milestone 6: Hardening and release packaging
+### Milestone 5: Hardening and release packaging
 
 - Add parser drift warnings and “unknown receipt format” diagnostics.
 - Add privacy documentation.
@@ -318,7 +298,6 @@ Complete nested receipt objects with parser metadata and raw/debug fields for re
 - How do online delivery orders, same-day Instacart orders, returns, pharmacy, optical, tire, and membership purchases differ from the in-warehouse receipt fixture?
 - Are `E`, `N`, and `Y` receipt markers consistent enough to map to food-stamp eligibility and taxable status, or should they remain raw flags until validated?
 - Does a receipt item quantity row always follow or precede the item it describes? Fixture expansion is needed before automatic quantity attachment is trusted.
-- Should category rules live only locally, or should the repo include a shareable optional rule pack?
 
 ## Agent implementation playbook
 
@@ -328,7 +307,7 @@ This section is intended for future coding agents. Treat each work package as a 
 
 1. **Read this document and the README first.** Confirm the current milestone and avoid implementing later-milestone UI before parser contracts are stable.
 2. **Inspect existing files before adding new ones.** Prefer extending established folders and scripts once they exist.
-3. **Keep pure logic separate from extension glue.** Anything that can be tested without Chrome belongs in `src/parsers`, `src/domain`, `src/export`, or `src/storage` abstractions.
+3. **Keep pure logic separate from extension glue.** Anything that can be tested without Chrome belongs in `src/parsers`, `src/domain`, or `src/export` abstractions.
 4. **Write or update tests with each parser/domain change.** Parser changes must include fixture-based tests or golden-output updates.
 5. **Record parser assumptions as warnings.** If Costco markup is ambiguous, preserve the raw text and emit a warning rather than silently guessing.
 6. **Use stable selectors.** Prefer `automation-id`, `data-testid`, ARIA roles, labels, text content, and table structure. Avoid Material UI generated CSS classes except as last-resort fallback selectors.
@@ -345,16 +324,14 @@ A. Tooling and extension skeleton
 B. Domain model and parser fixtures
 C. Orders-list parser
 D. Receipt parser
-E. CSV/JSON exporters
+E. CSV/JSON/TOON exporters
 F. Content-script adapters for live Costco pages
 G. Background scrape state machine
-H. Popup/side-panel UI
-I. Storage/checkpointing
-J. Categorization review
-K. Integration tests and packaging
+H. Popup/side-panel review UI
+I. Integration tests and packaging
 ```
 
-Agents can work in parallel only when their file ownership is disjoint. For example, one agent can implement exporters while another implements parser tests after the domain model stabilizes. Do not run two agents against the same parser file at the same time.
+Agents can work in parallel only when their file ownership is disjoint. For example, one agent can implement TOON/CSV exporters while another implements parser tests after the domain model stabilizes. Do not run two agents against the same parser file at the same time.
 
 ### Work package A: Tooling and extension skeleton
 
@@ -381,7 +358,6 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 3. Add `manifest.json` with minimal permissions:
    - `activeTab`
    - `scripting`
-   - `storage`
    - `downloads`
    - host permissions for `https://www.costco.com/*`.
 4. Add a minimal background service worker that responds to a health-check message.
@@ -414,7 +390,7 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 **Implementation steps:**
 
 1. Convert the receipt and item interfaces in this document into TypeScript types.
-2. Add `OrderSummary`, `ScrapeJob`, `CategoryRule`, and export-row types.
+2. Add `OrderSummary`, `ScrapeJob`, and export-row types.
 3. Implement shared helpers for currency parsing, receipt id normalization, text normalization, and stable hashing.
 4. Build a fixture loader that reads `examples/*.html` in tests.
 5. Add placeholder golden JSON files with the expected fixture names and schema versions.
@@ -505,17 +481,18 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 - Discount rows are either attached to items or reported as warnings.
 - Tests fail loudly if Costco changes the receipt table shape.
 
-**Handoff:** exporter and categorization agents should consume only the normalized receipt output, not raw DOM rows.
+**Handoff:** exporter agents should consume only the normalized receipt output, not raw DOM rows.
 
-### Work package E: Exporters
+### Work package E: CSV/JSON/TOON exporters
 
-**Goal:** generate analysis-ready CSV and JSON downloads from normalized receipts.
+**Goal:** generate analysis-ready CSV, JSON, and TOON downloads from normalized receipts.
 
 **Suggested file ownership:**
 
 - `extension/src/export/itemsCsv.ts`
 - `extension/src/export/receiptsCsv.ts`
 - `extension/src/export/ordersJson.ts`
+- `extension/src/export/ordersToon.ts`
 - `extension/src/export/csv.ts`
 - exporter tests
 
@@ -523,7 +500,7 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 
 1. Implement safe CSV escaping for commas, quotes, newlines, and empty values.
 2. Implement `receiptToReceiptCsvRow` and `receiptToItemCsvRows` mappers using the columns in this document.
-3. Include category fields even before categorization UI exists; default to `uncategorized`.
+3. Implement a TOON exporter with the same semantic fields as the JSON exporter and stable field ordering.
 4. Include parser warnings and raw text fields for auditability.
 5. Add tests using synthetic receipts and the receipt golden fixture.
 6. Add a browser-facing helper that creates `Blob` objects or download payloads without directly calling `chrome.downloads`.
@@ -532,7 +509,7 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 
 - CSV output opens correctly in spreadsheet tools.
 - Numeric fields are not formatted with dollar signs in CSV data cells.
-- JSON export preserves complete nested receipt objects and schema versions.
+- JSON and TOON exports preserve complete nested receipt objects and schema versions.
 
 **Handoff:** background-worker agents can call exporter helpers and then use `chrome.downloads` for actual downloads.
 
@@ -560,7 +537,7 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 
 **Acceptance criteria:**
 
-- Adapters have no category/export/storage logic.
+- Adapters have no export or review rendering logic.
 - All content-script responses are serializable plain objects.
 - Timeouts and missing selectors return structured errors rather than throwing uncaught exceptions.
 
@@ -568,7 +545,7 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 
 ### Work package G: Background scrape orchestrator
 
-**Goal:** implement a resumable, rate-limited scrape state machine.
+**Goal:** implement a session-only, rate-limited scrape state machine.
 
 **Suggested file ownership:**
 
@@ -587,16 +564,15 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
    - open modal
    - read receipt HTML
    - parse receipt
-   - persist receipt and items
+   - append receipt and items to the in-memory scrape result
    - close modal
-   - checkpoint job state
 5. Add rate limits between modal opens and page interactions.
 6. Detect login/session failures and transition to `loginRequired` with instructions.
 7. Surface progress events to popup/side panel UI.
 
 **Acceptance criteria:**
 
-- Scraping can be paused/cancelled without losing parsed receipts.
+- Scraping can be paused/cancelled without losing parsed receipts during the current browser session.
 - A single receipt failure does not abort the entire job unless the page/session is unusable.
 - Job status includes counts for discovered, queued, parsed, skipped, failed, and exported receipts.
 
@@ -604,7 +580,7 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 
 ### Work package H: Popup or side-panel UI
 
-**Goal:** provide user controls for scrape, progress, review entry point, and export.
+**Goal:** provide user controls for scrape, progress, receipt/item review, and export.
 
 **Suggested file ownership:**
 
@@ -617,78 +593,19 @@ Agents can work in parallel only when their file ownership is disjoint. For exam
 1. Show active-tab support status and link users to Costco Orders & Purchases if unsupported.
 2. Add buttons for discover, start, pause, resume, cancel, and export.
 3. Render progress counts and latest error/warning messages.
-4. Render the last successful export timestamp and number of stored receipts/items.
-5. Add an entry point for category review, even if the review screen is implemented later.
+4. Render discovered receipts and item rows in an inspectable receipt-centric view.
+5. Render parser warnings beside affected receipts/items.
 6. Keep UI state derived from background job status rather than duplicating state locally.
 
 **Acceptance criteria:**
 
 - UI remains usable when the background worker restarts.
 - Unsupported pages show clear instructions instead of disabled mystery controls.
-- User can scrape current visible orders and download files once background/exporter work exists.
+- User can scrape current visible orders, inspect receipt items, and download files once background/exporter work exists.
 
-**Handoff:** category review can be added as a separate screen without changing scrape orchestration.
+**Handoff:** downstream categorization should consume exported CSV/JSON/TOON outside this extension.
 
-### Work package I: Storage and checkpointing
-
-**Goal:** persist receipts, items, category rules, and scrape checkpoints locally.
-
-**Suggested file ownership:**
-
-- `extension/src/storage/db.ts`
-- `extension/src/storage/receiptRepository.ts`
-- `extension/src/storage/jobRepository.ts`
-- `extension/src/storage/categoryRuleRepository.ts`
-- storage tests using fake IndexedDB or equivalent
-
-**Implementation steps:**
-
-1. Create an IndexedDB schema with versioned migrations.
-2. Store receipts keyed by receipt id or synthetic fallback key.
-3. Store items keyed by `receiptId + lineIndex`.
-4. Store job checkpoints in a compact form that survives service-worker restarts.
-5. Store category rules separately from parsed data so re-categorization is possible.
-6. Add repository APIs that hide IndexedDB details from background/UI code.
-7. Add migration tests for initial schema creation.
-
-**Acceptance criteria:**
-
-- Parsed receipts survive extension popup closure and service-worker restart.
-- Re-running a scrape skips or updates duplicates deterministically.
-- Storage APIs return plain domain objects, not IndexedDB cursors/events.
-
-**Handoff:** categorization and exports can query repositories without knowing browser storage details.
-
-### Work package J: Categorization and review
-
-**Goal:** let users assign categories at item granularity and reuse those assignments.
-
-**Suggested file ownership:**
-
-- `extension/src/domain/categories.ts`
-- `extension/src/domain/categoryRules.ts`
-- `extension/src/ui/categoryReview.*`
-- category tests
-
-**Implementation steps:**
-
-1. Implement built-in seed rules with low/medium confidence.
-2. Implement user-rule precedence: item number, exact normalized description, regex/keyword.
-3. Add a categorization function that returns category, confidence, source, and explanation.
-4. Group uncategorized and low-confidence items by item number and normalized description.
-5. Add UI to bulk-assign a category and create/update a user rule.
-6. Add a re-categorize action for all stored items after rules change.
-7. Ensure exports always reflect the latest category assignments.
-
-**Acceptance criteria:**
-
-- Manual user rules override built-in rules.
-- One category assignment can update all matching historical items.
-- Exports include category source/confidence for every item.
-
-**Handoff:** optional future agents can add richer rule packs or import/export of category rules.
-
-### Work package K: Integration tests, QA, and packaging
+### Work package I: Integration tests, QA, and packaging
 
 **Goal:** validate the full extension flow and produce a repeatable release artifact.
 
@@ -729,7 +646,7 @@ type ExtensionRequest =
   | { type: 'RECEIPT_CLOSE'; version: 1 }
   | { type: 'SCRAPE_START'; version: 1; options: ScrapeOptions }
   | { type: 'SCRAPE_STATUS'; version: 1 }
-  | { type: 'EXPORT_DOWNLOAD'; version: 1; format: 'items_csv' | 'receipts_csv' | 'json' };
+  | { type: 'EXPORT_DOWNLOAD'; version: 1; format: 'items_csv' | 'receipts_csv' | 'json' | 'toon' };
 ```
 
 Responses should use a consistent result wrapper:
@@ -760,7 +677,6 @@ Use machine-readable error codes so UI and tests can react consistently:
 - `RECEIPT_MODAL_TIMEOUT`
 - `RECEIPT_PARSE_FAILED`
 - `RECEIPT_TOTAL_MISMATCH`
-- `STORAGE_WRITE_FAILED`
 - `EXPORT_FAILED`
 
 ### Definition of done for project tasks
