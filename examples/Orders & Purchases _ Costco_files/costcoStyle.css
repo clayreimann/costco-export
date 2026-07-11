@@ -1,0 +1,48 @@
+.attrEntry div.mdc-text-field, .entry-item div.mdc-text-field {
+	max-height: 2.5rem !important;
+}
+
+.mdc-text-field:not(.mdc-text-field--invalid):not(.mdc-text-field--focused) label {
+  color: #333 !important;
+  caret-color: #333;
+}
+
+.mdc-text-field--focused:not(.mdc-text-field--invalid) label {
+	color: #3071a9 !important;
+}
+
+.mdc-text-field--focused:not(.mdc-text-field--invalid) input {
+	caret-color: #3071a9;
+}
+.mdc-text-field:not(.mdc-text-field--invalid) div.mdc-notched-outline div.mdc-notched-outline__leading,
+.mdc-text-field:not(.mdc-text-field--invalid) div.mdc-notched-outline div.mdc-notched-outline__notch,
+.mdc-text-field:not(.mdc-text-field--invalid) div.mdc-notched-outline div.mdc-notched-outline__trailing {
+  border-color: #333;
+}
+
+.mdc-text-field--focused:not(.mdc-text-field--invalid) div.mdc-notched-outline div.mdc-notched-outline__leading,
+.mdc-text-field--focused:not(.mdc-text-field--invalid) div.mdc-notched-outline div.mdc-notched-outline__notch,
+.mdc-text-field--focused:not(.mdc-text-field--invalid) div.mdc-notched-outline div.mdc-notched-outline__trailing {
+	border-color: #3071a9 !important;
+}
+
+
+.attrEntry .mdc-floating-label, .entry-item .mdc-floating-label, .attrEntry input, .entry-item input {
+	font-size: 0.875rem !important;
+}
+
+.attrEntry .mdc-floating-label--float-above, .entry-item .mdc-floating-label--float-above {
+	transform: translateY(-27px)scale(0.75) !important;
+}
+
+.entry .entry-item {
+	margin-bottom: 1.25rem;
+}
+
+.mdc-floating-label::after{
+		display: none;
+	}
+
+#hasMembershipForm input.form-control {
+	color: #333 !important;
+}

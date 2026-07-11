@@ -1,0 +1,1 @@
+window.queueit_clientside_config={"customerId":"costco","integrations":[]};QueueIt.Javascript.PageEventIntegration.initQueueClient(window.queueit_clientside_config);
